@@ -1,38 +1,16 @@
 """信州大学シラバススクレイパー - campus-3.shinshu-u.ac.jp からシラバスデータを取得
 
-信州大学シラバス検索システムのHTML構造:
-
-検索ページ: /syllabusj/Search?Code={学部コード}
-  - フォーム: 開講年度、開講期間、曜日、時限、授業名、教員氏名等で検索
-  - 検索結果: テーブル形式で一覧表示
-
-詳細ページ: /syllabusj/Display?BUKYOKU={学部コード}&CODE={科目コード}&NENDO={年度}
-  - テーブル形式で詳細情報を表示
-  - 項目: 授業名、担当教員、講義期間、曜日・時限、講義室、単位数、
-          対象学生、授業のねらい、授業の概要、授業計画、成績評価、
-          履修上の注意、教科書、参考書 等
-
-学部コード:
-  L: 人文学部, E: 教育学部, J: 経法学部, S: 理学部,
-  M: 医学部, T: 工学部, A: 農学部, F: 繊維学部,
-  G: 共通教育, R2: グローバル化推進センター
-
-大学院コード:
-  EA: 教育学研究科, UA: 総合人文社会科学研究科,
-  MS: 医学系研究科(修士), SS: 総合理工学研究科(理学),
-  TS: 総合理工学研究科(工学), FS: 総合理工学研究科(繊維学),
-  AS: 総合理工学研究科(農学), BS: 総合理工学研究科(生命医工学),
-  HM: 総合医理工学研究科(医学系), HS: 総合医理工学研究科(総合理工学),
-  HB: 総合医理工学研究科(生命医工学), ST: 総合工学系研究科,
-  INKYOUTSUU: 大学院共通教育用科目
+ページネーション仕組み（実調査に基づく）:
+- 検索はPOSTリクエスト（method=post）
+- 1ページ目: BtKENSAKU ボタンで検索実行
+- 2ページ目以降: BtNEXT ボタンで次ページ遷移（セッションCookie必須）
+- 1ページあたり100件表示
 """
 
 import json
 import time
-import sys
 import re
 from pathlib import Path
-from urllib.parse import urljoin, urlencode
 
 import httpx
 from bs4 import BeautifulSoup
@@ -41,9 +19,7 @@ BASE_URL = "https://campus-3.shinshu-u.ac.jp/syllabusj"
 SEARCH_URL = f"{BASE_URL}/Search"
 DISPLAY_URL = f"{BASE_URL}/Display"
 
-# 学部・研究科コードマッピング
 FACULTY_CODES = {
-    # 学部
     "L": "人文学部",
     "E": "教育学部",
     "J": "経法学部",
@@ -54,7 +30,6 @@ FACULTY_CODES = {
     "F": "繊維学部",
     "G": "共通教育",
     "R2": "グローバル化推進センター",
-    # 大学院
     "EA": "教育学研究科",
     "UA": "総合人文社会科学研究科",
     "MS": "医学系研究科（修士課程）",
@@ -69,98 +44,128 @@ FACULTY_CODES = {
     "ST": "総合工学系研究科",
 }
 
-# 学部コードのみ（大学院を含まない）
 UNDERGRADUATE_CODES = ["L", "E", "J", "S", "M", "T", "A", "F", "G", "R2"]
-
-# 全コード
 ALL_CODES = list(FACULTY_CODES.keys())
 
 
-def fetch_search_results(
-    client: httpx.Client,
-    faculty_code: str,
-    year: int,
-    period: str = "",
-    day: str = "",
-    course_name: str = "",
-    instructor: str = "",
-) -> BeautifulSoup:
-    """検索結果ページを取得する。
+def make_search_data(faculty_code: str, year: int) -> dict:
+    """1ページ目の検索フォームデータ。"""
+    return {
+        "Pos": "",
+        "Mode": "1",
+        "StartNo": "0",
+        "Bukyoku": faculty_code,
+        "Nendo": str(year),
+        "Meisyou": "",
+        "Kyouin": "",
+        "KyouinKana": "",
+        "Keikaku": "",
+        "Taisyou": "",
+        "CodeStart": "",
+        "CodeJyouken": "0",
+        "BtKENSAKU": "\u3000\u691c\u3000\u7d22\u3000",
+    }
 
-    信州大学のシラバス検索はGETパラメータでフォームを送信する形式。
-    フォームのaction先やパラメータ名はサイトの実装に依存するため、
-    直接検索ページにアクセスして結果を取得する。
-    """
-    params = {"Code": faculty_code}
-    if year:
-        params["ESSION"] = str(year)  # 年度パラメータ名（サイト固有）
 
-    resp = client.get(SEARCH_URL, params=params)
-    resp.raise_for_status()
-    return BeautifulSoup(resp.text, "lxml")
+def make_next_page_data(faculty_code: str, year: int, pos: str) -> dict:
+    """2ページ目以降の「次へ」ボタンデータ。"""
+    return {
+        "Pos": pos,
+        "Mode": "1",
+        "StartNo": "0",
+        "Bukyoku": faculty_code,
+        "Nendo": str(year),
+        "Meisyou": "",
+        "Kyouin": "",
+        "KyouinKana": "",
+        "Keikaku": "",
+        "Taisyou": "",
+        "CodeStart": "",
+        "CodeJyouken": "0",
+        "BtNEXT": "\u6b21\u3078 >",
+    }
+
+
+def get_pos_value(soup: BeautifulSoup) -> str:
+    """hidden input 'Pos' の値を取得する。"""
+    inp = soup.find("input", {"name": "Pos"})
+    if inp:
+        return inp.get("value", "")
+    return ""
+
+
+def has_next_button(soup: BeautifulSoup) -> bool:
+    """「次へ」ボタンがあるか確認する。"""
+    for inp in soup.find_all("input"):
+        if inp.get("name") == "BtNEXT":
+            return True
+    return False
+
+
+def get_total_count(soup: BeautifulSoup) -> int | None:
+    """「全XXX件中」のような表示から総件数を取得する。"""
+    text = soup.get_text()
+    match = re.search(r"全(\d+)件", text)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def parse_search_results(soup: BeautifulSoup, faculty_code: str) -> list[dict]:
-    """検索結果テーブルからコース一覧を解析する。
-
-    テーブルのカラム:
-    開講年度 | 開講期間 | コード | 授業名 | 教員氏名 | 曜日・時限 | 開講部局 | 開講場所 | ダウンロード
-    """
+    """検索結果テーブルからコース一覧を解析する。"""
     courses = []
+    seen_ids = set()
 
-    # テーブルの行を探す
-    tables = soup.find_all("table")
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
-            cells = row.find_all("td")
-            if len(cells) < 7:
-                continue
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        if "Display" not in href:
+            continue
 
-            # リンクから詳細ページのパラメータを取得
-            link = row.find("a", href=True)
-            if not link or "Display" not in link.get("href", ""):
-                continue
+        code_match = re.search(r"CODE=([^&]+)", href)
+        nendo_match = re.search(r"NENDO=(\d+)", href)
+        bukyoku_match = re.search(r"BUKYOKU=([^&]+)", href)
 
-            href = link["href"]
-            # Display?BUKYOKU=T&CODE=XXXX&NENDO=2025 のようなURLを解析
-            code_match = re.search(r"CODE=([^&]+)", href)
-            nendo_match = re.search(r"NENDO=(\d+)", href)
-            bukyoku_match = re.search(r"BUKYOKU=([^&]+)", href)
+        if not code_match:
+            continue
 
-            if not code_match:
-                continue
+        course_code = code_match.group(1)
+        year = int(nendo_match.group(1)) if nendo_match else 0
+        bukyoku = bukyoku_match.group(1) if bukyoku_match else faculty_code
 
-            course_code = code_match.group(1)
-            year = int(nendo_match.group(1)) if nendo_match else 0
-            bukyoku = bukyoku_match.group(1) if bukyoku_match else faculty_code
+        course_id = f"{year}_{bukyoku}_{course_code}"
+        if course_id in seen_ids:
+            continue
+        seen_ids.add(course_id)
 
-            # テーブルのセルからデータ取得
-            cell_texts = [c.get_text(strip=True) for c in cells]
+        row = link.find_parent("tr")
+        if not row:
+            continue
 
-            course = {
-                "id": f"{year}_{bukyoku}_{course_code}",
-                "code": course_code,
-                "faculty_code": bukyoku,
-                "faculty": FACULTY_CODES.get(bukyoku, bukyoku),
-                "year": year,
-                "url": urljoin(BASE_URL + "/", href),
-            }
+        cells = row.find_all("td")
+        cell_texts = [c.get_text(strip=True) for c in cells]
 
-            # セルの数に応じてデータをマッピング
-            if len(cell_texts) >= 8:
-                course["year_display"] = cell_texts[0]
-                course["period"] = cell_texts[1]
-                course["title"] = cell_texts[3] if cell_texts[3] else link.get_text(strip=True)
-                course["instructor"] = cell_texts[4]
-                course["schedule"] = cell_texts[5]
-                course["faculty_display"] = cell_texts[6]
-                course["location"] = cell_texts[7]
-            else:
-                course["title"] = link.get_text(strip=True)
+        course = {
+            "id": course_id,
+            "code": course_code,
+            "faculty_code": bukyoku,
+            "faculty": FACULTY_CODES.get(bukyoku, bukyoku),
+            "year": year,
+            "url": f"{BASE_URL}/{href}" if not href.startswith("http") else href,
+        }
 
-            if course.get("title"):
-                courses.append(course)
+        if len(cell_texts) >= 8:
+            course["year_display"] = cell_texts[0]
+            course["period"] = cell_texts[1]
+            course["title"] = cell_texts[3] or link.get_text(strip=True)
+            course["instructor"] = cell_texts[4]
+            course["schedule"] = cell_texts[5]
+            course["faculty_display"] = cell_texts[6]
+            course["location"] = cell_texts[7]
+        else:
+            course["title"] = link.get_text(strip=True)
+
+        if course.get("title"):
+            courses.append(course)
 
     return courses
 
@@ -179,18 +184,7 @@ def fetch_course_detail(
 def parse_course_detail(
     soup: BeautifulSoup, bukyoku: str, code: str, year: int
 ) -> dict:
-    """シラバス詳細ページのHTMLを解析する。
-
-    構造例:
-    | 開講年度 | 2025年度 | 登録コード | XXXX | ... |
-    | 授業名   | YYYY     |            |      |     |
-    | 担当教員 | ZZZZ     | 副担当     | ...  |     |
-    | 講義期間 | 前期     | 曜日・時限 | 月1  | ... |
-    ...
-    | (1)授業のねらい | テキスト... |
-    | (2)授業の概要   | テキスト... |
-    ...
-    """
+    """シラバス詳細ページのHTMLを解析する。"""
     detail = {
         "id": f"{year}_{bukyoku}_{code}",
         "code": code,
@@ -200,44 +194,22 @@ def parse_course_detail(
         "url": f"{DISPLAY_URL}?BUKYOKU={bukyoku}&CODE={code}&NENDO={year}",
     }
 
-    # テーブルの全行を走査してキーバリューペアを抽出
-    tables = soup.find_all("table")
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
-            cells = row.find_all(["td", "th"])
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
+            cells = row.find_all("td")
             if len(cells) < 2:
                 continue
-
-            # dt/dd パターンやキーバリューテーブルを処理
             i = 0
             while i < len(cells) - 1:
                 key = cells[i].get_text(strip=True)
                 value = cells[i + 1].get_text(strip=True)
-
                 if key and value:
                     _map_field(detail, key, value)
-
                 i += 2
-
-    # 注意書き等の補足テキストも取得
-    # hr タグ以降のテーブルにシラバス本文がある
-    hr = soup.find("hr")
-    if hr:
-        content_table = hr.find_next("table")
-        if content_table:
-            for row in content_table.find_all("tr"):
-                cells = row.find_all("td")
-                if len(cells) >= 2:
-                    key = cells[0].get_text(strip=True)
-                    value = cells[1].get_text(strip=True)
-                    if key and value:
-                        _map_field(detail, key, value)
 
     return detail
 
 
-# フィールドマッピング
 FIELD_MAP = {
     "授業名": "title",
     "開講年度": "year_display",
@@ -260,19 +232,13 @@ FIELD_MAP = {
     "【教科書】": "textbook",
     "【参考書】": "references",
     "【添付ファイル】": "attachments",
-    "県内大学開放授業": "open_course_prefectural",
-    "市民開放授業": "open_course_public",
 }
 
 
 def _map_field(detail: dict, key: str, value: str):
-    """キーに基づいてフィールドをマッピングする。"""
-    # 完全一致
     if key in FIELD_MAP:
         detail[FIELD_MAP[key]] = value
         return
-
-    # 部分一致
     for k, v in FIELD_MAP.items():
         if k in key:
             detail[v] = value
@@ -284,26 +250,75 @@ def scrape_faculty(
     faculty_code: str,
     year: int,
     fetch_details: bool = True,
-    delay: float = 0.3,
+    delay: float = 0.5,
 ) -> list[dict]:
     """指定学部の全シラバスをスクレイピングする。"""
     faculty_name = FACULTY_CODES.get(faculty_code, faculty_code)
     print(f"\n--- {faculty_name} ({faculty_code}) を取得中 ---")
 
-    # 検索結果を取得
-    soup = fetch_search_results(client, faculty_code, year)
+    all_courses = []
+    seen_ids = set()
+
+    # 1ページ目: 検索実行
+    print(f"  ページ 1...")
+    form_data = make_search_data(faculty_code, year)
+    resp = client.post(SEARCH_URL, params={"Code": faculty_code}, data=form_data)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "lxml")
+
+    total = get_total_count(soup)
+    if total is not None:
+        print(f"  全 {total} 件")
+
     courses = parse_search_results(soup, faculty_code)
-    print(f"  一覧: {len(courses)} 件")
+    for c in courses:
+        if c["id"] not in seen_ids:
+            seen_ids.add(c["id"])
+            all_courses.append(c)
+    print(f"    -> {len(courses)} 件取得 (累計: {len(all_courses)})")
+
+    # 2ページ目以降: 「次へ」ボタン
+    page = 2
+    while has_next_button(soup):
+        time.sleep(delay)
+        pos = get_pos_value(soup)
+        print(f"  ページ {page} (Pos={pos[:20]}...)...")
+
+        form_data = make_next_page_data(faculty_code, year, pos)
+        resp = client.post(SEARCH_URL, params={"Code": faculty_code}, data=form_data)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        courses = parse_search_results(soup, faculty_code)
+        new_count = 0
+        for c in courses:
+            if c["id"] not in seen_ids:
+                seen_ids.add(c["id"])
+                all_courses.append(c)
+                new_count += 1
+
+        print(
+            f"    -> {len(courses)} 件取得 (新規: {new_count}, 累計: {len(all_courses)})"
+        )
+
+        # 新規が0件なら終了（安全策）
+        if new_count == 0:
+            print(f"  新規0件のため終了")
+            break
+
+        page += 1
+
+    print(f"  一覧合計: {len(all_courses)} 件")
 
     if not fetch_details:
-        return courses
+        return all_courses
 
     # 各コースの詳細を取得
     detailed_courses = []
-    for i, course in enumerate(courses):
+    for i, course in enumerate(all_courses):
         time.sleep(delay)
-        if (i + 1) % 20 == 0 or (i + 1) == len(courses):
-            print(f"  詳細取得中: {i + 1}/{len(courses)}")
+        if (i + 1) % 20 == 0 or (i + 1) == len(all_courses):
+            print(f"  詳細取得中: {i + 1}/{len(all_courses)}")
         try:
             detail = fetch_course_detail(
                 client,
@@ -311,7 +326,6 @@ def scrape_faculty(
                 course["code"],
                 course.get("year", year),
             )
-            # 一覧情報とマージ（詳細ページの情報を優先）
             merged = {**course, **detail}
             detailed_courses.append(merged)
         except Exception as e:
@@ -325,14 +339,13 @@ def scrape_all(
     year: int,
     codes: list[str] | None = None,
     fetch_details: bool = True,
-    delay: float = 0.3,
+    delay: float = 0.5,
 ) -> list[dict]:
-    """全学部のシラバスをスクレイピングする。"""
     if codes is None:
         codes = ALL_CODES
 
     all_courses = []
-    with httpx.Client(timeout=30, follow_redirects=True) as client:
+    with httpx.Client(timeout=60, follow_redirects=True, verify=False) as client:
         for code in codes:
             try:
                 courses = scrape_faculty(
@@ -354,50 +367,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
-  # 2025年度の全学部をスクレイピング
-  python scraper.py 2025
-
-  # 工学部と理学部のみ
-  python scraper.py 2025 --faculties T S
-
-  # 学部のみ（大学院を除く）
-  python scraper.py 2025 --undergrad-only
-
-  # 一覧のみ取得（詳細ページは取得しない）
-  python scraper.py 2025 --no-details
-
-  # 複数年度
-  python scraper.py 2024 2025
-
-学部コード一覧:
-  L: 人文学部, E: 教育学部, J: 経法学部, S: 理学部,
-  M: 医学部, T: 工学部, A: 農学部, F: 繊維学部,
-  G: 共通教育, R2: グローバル化推進センター
+  python scraper.py 2026 --faculties T --no-details   # まずテスト
+  python scraper.py 2026 --faculties T                # 詳細付き
+  python scraper.py 2026 --undergrad-only             # 全学部
+  python scraper.py 2025 2026                         # 複数年度
         """,
     )
     parser.add_argument("years", type=int, nargs="+", help="取得する年度（西暦）")
-    parser.add_argument(
-        "--faculties",
-        nargs="*",
-        default=None,
-        help="取得する学部コード（省略時は全学部）",
-    )
-    parser.add_argument(
-        "--undergrad-only",
-        action="store_true",
-        help="学部のみ取得（大学院を除く）",
-    )
-    parser.add_argument(
-        "--no-details",
-        action="store_true",
-        help="詳細ページは取得せず一覧のみ取得",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=0.3,
-        help="リクエスト間の待機時間（秒、デフォルト: 0.3）",
-    )
+    parser.add_argument("--faculties", nargs="*", default=None)
+    parser.add_argument("--undergrad-only", action="store_true")
+    parser.add_argument("--no-details", action="store_true")
+    parser.add_argument("--delay", type=float, default=0.5)
 
     args = parser.parse_args()
 
@@ -414,10 +394,7 @@ def main():
         print(f"{'='*50}")
 
         courses = scrape_all(
-            year,
-            codes=codes,
-            fetch_details=not args.no_details,
-            delay=args.delay,
+            year, codes=codes, fetch_details=not args.no_details, delay=args.delay
         )
 
         output_path = output_dir / f"courses_{year}.json"
