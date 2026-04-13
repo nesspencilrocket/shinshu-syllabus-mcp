@@ -169,6 +169,12 @@ MIT
 
 信州大学のシラバスを検索できるMCPサーバー。
 
+以下の内容より制作の判断
+「https://campus-3.shinshu-u.ac.jp/syllabusj/Top/robots.txt」(学内wi-fi4/13閲覧)
+User-agent : *
+Disallow : /
+Allow : /syllabusj
+
 Claude Code や他のMCP対応AIツールから、信州大学の授業を自然言語で検索できます。
 
 ## データソース
