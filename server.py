@@ -1,19 +1,11 @@
 """信州大学シラバス MCP サーバー
 
 信州大学のシラバスを検索・閲覧できるMCPサーバー。
-データソース: campus-3.shinshu-u.ac.jp/syllabusj/（公開シラバスデータ、認証不要）
-
-対応学部:
-  人文学部、教育学部、経法学部、理学部、医学部、工学部、農学部、繊維学部、
-  共通教育、グローバル化推進センター
-
-対応大学院:
-  教育学研究科、総合人文社会科学研究科、医学系研究科、
-  総合理工学研究科（理学・工学・繊維学・農学・生命医工学）、
-  総合医理工学研究科（医学系・総合理工学・生命医工学）、総合工学系研究科
+データソース: campus-3.shinshu-u.ac.jp/syllabusj/（公開シラバスデータ）
 """
 
 import json
+import re
 from pathlib import Path
 from collections import Counter
 
@@ -31,7 +23,6 @@ mcp = FastMCP(
     ),
 )
 
-# 学部コード → 名称のマッピング
 FACULTY_MAP = {
     "L": "人文学部",
     "E": "教育学部",
@@ -57,12 +48,10 @@ FACULTY_MAP = {
     "ST": "総合工学系研究科",
 }
 
-# データキャッシュ
 _courses: list[dict] = []
 
 
 def _load_courses() -> list[dict]:
-    """JSONファイルからコースデータを読み込む（初回のみ）。"""
     global _courses
     if _courses:
         return _courses
@@ -73,12 +62,10 @@ def _load_courses() -> list[dict]:
 
 
 def _match(value: str, query: str) -> bool:
-    """大文字小文字を区別しない部分一致検索（日本語・英語対応）。"""
     return query.lower() in value.lower()
 
 
-def _format_course_summary(course: dict) -> dict:
-    """コースの要約情報を返す（一覧表示用）。"""
+def _format_summary(course: dict) -> dict:
     return {
         "id": course.get("id", ""),
         "title": course.get("title", ""),
@@ -108,63 +95,43 @@ def search_courses(
     Args:
         keyword: 科目名・概要・授業計画で検索（例: "プログラミング", "線形代数", "English"）
         instructor: 教員名で検索（例: "山田", "鈴木"）
-        faculty: 学部・研究科名で絞り込み（例: "工学部", "理学部", "共通教育", "繊維", "医"）
-                 学部コードも使用可: L(人文), E(教育), J(経法), S(理), M(医), T(工), A(農), F(繊維), G(共通教育)
+        faculty: 学部名で絞り込み（例: "工学部", "理学部", "共通教育"）。コードも可: L,E,J,S,M,T,A,F,G
         period: 開講期間で絞り込み（"前期", "後期", "通年"）
         day: 曜日で絞り込み（"月", "火", "水", "木", "金", "土"）
         credits: 単位数で絞り込み（例: "2", "1"）
-        target: 対象学生で絞り込み（例: "1年", "2～4", "3年"）
+        target: 対象学生で絞り込み（例: "1年", "2～4"）
         limit: 最大件数（デフォルト20、最大100）
-
-    Returns:
-        マッチしたコースの一覧（要約情報）
     """
     courses = _load_courses()
     limit = min(limit, 100)
     results = []
 
     for c in courses:
-        # キーワード検索（科目名、概要、授業計画、分野）
         if keyword and not any(
-            _match(c.get(field, ""), keyword)
-            for field in ["title", "overview", "objectives", "plan", "notes"]
+            _match(c.get(f, ""), keyword)
+            for f in ["title", "overview", "objectives", "plan", "notes"]
         ):
             continue
-
-        # 教員名検索
         if instructor and not (
             _match(c.get("instructor", ""), instructor)
             or _match(c.get("sub_instructor", ""), instructor)
         ):
             continue
-
-        # 学部絞り込み（名称またはコード）
-        if faculty:
-            faculty_match = (
-                _match(c.get("faculty", ""), faculty)
-                or _match(c.get("faculty_code", ""), faculty)
-                or _match(c.get("faculty_display", ""), faculty)
-            )
-            if not faculty_match:
-                continue
-
-        # 開講期間
+        if faculty and not (
+            _match(c.get("faculty", ""), faculty)
+            or _match(c.get("faculty_code", ""), faculty)
+        ):
+            continue
         if period and not _match(c.get("period", ""), period):
             continue
-
-        # 曜日
         if day and not _match(c.get("schedule", ""), day):
             continue
-
-        # 単位数
         if credits and not _match(c.get("credits", ""), credits):
             continue
-
-        # 対象学生
         if target and not _match(c.get("target_students", ""), target):
             continue
 
-        results.append(_format_course_summary(c))
+        results.append(_format_summary(c))
         if len(results) >= limit:
             break
 
@@ -176,29 +143,23 @@ def get_course(course_id: str) -> dict:
     """科目IDで詳細情報を取得する。
 
     Args:
-        course_id: 科目ID（例: "2025_T_TA001"）。search_coursesの結果に含まれるidフィールドを使用する。
-
-    Returns:
-        科目の全詳細情報（授業のねらい、概要、授業計画、成績評価方法、教科書等を含む）
+        course_id: 科目ID（例: "2026_T_T0008200"）。search_coursesの結果のidを使用。
     """
     courses = _load_courses()
     for c in courses:
         if c.get("id") == course_id:
             return c
-    return {"error": f"科目ID '{course_id}' が見つかりません。search_coursesで検索してIDを確認してください。"}
+    return {"error": f"科目ID '{course_id}' が見つかりません。"}
 
 
 @mcp.tool()
 def get_course_by_code(code: str, faculty_code: str = "", year: int = 0) -> list[dict]:
-    """登録コード（科目コード）でシラバスを検索する。
+    """登録コード（科目コード）で検索する。
 
     Args:
-        code: 登録コード（例: "TA001", "LH117"）。部分一致で検索する。
-        faculty_code: 学部コード（省略可、例: "T", "L"）
-        year: 年度（省略時は全年度対象）
-
-    Returns:
-        マッチしたコースの一覧
+        code: 登録コード（例: "T0008200"）。部分一致。
+        faculty_code: 学部コード（省略可）
+        year: 年度（省略時は全年度）
     """
     courses = _load_courses()
     results = []
@@ -215,14 +176,11 @@ def get_course_by_code(code: str, faculty_code: str = "", year: int = 0) -> list
 
 @mcp.tool()
 def list_instructors(keyword: str = "", faculty: str = "") -> list[str]:
-    """教員一覧を取得する。キーワードや学部で絞り込み可能。
+    """教員一覧を取得する。
 
     Args:
-        keyword: 教員名の一部（例: "山田"）。空なら全教員を返す。
+        keyword: 教員名の一部（例: "山田"）
         faculty: 学部名・コードで絞り込み（例: "工学部", "T"）
-
-    Returns:
-        教員名のリスト（五十音順）
     """
     courses = _load_courses()
     instructors = set()
@@ -234,7 +192,6 @@ def list_instructors(keyword: str = "", faculty: str = "") -> list[str]:
             continue
         name = c.get("instructor", "").strip()
         if name:
-            # 複数教員が記載されている場合は分割
             for n in re.split(r"[,、／/]", name):
                 n = n.strip()
                 if n:
@@ -248,21 +205,14 @@ def list_instructors(keyword: str = "", faculty: str = "") -> list[str]:
 
 @mcp.tool()
 def list_faculties() -> list[dict]:
-    """利用可能な学部・研究科の一覧とそのコード、科目数を返す。
-
-    Returns:
-        学部・研究科コード、名称、科目数のリスト
-    """
+    """利用可能な学部・研究科の一覧とコード、科目数を返す。"""
     courses = _load_courses()
     counts = Counter(c.get("faculty_code", "不明") for c in courses)
-
-    result = []
-    for code, name in FACULTY_MAP.items():
-        count = counts.get(code, 0)
-        if count > 0:
-            result.append({"code": code, "name": name, "course_count": count})
-
-    return result
+    return [
+        {"code": code, "name": name, "course_count": counts.get(code, 0)}
+        for code, name in FACULTY_MAP.items()
+        if counts.get(code, 0) > 0
+    ]
 
 
 @mcp.tool()
@@ -271,16 +221,11 @@ def course_stats(faculty: str = "") -> dict:
 
     Args:
         faculty: 学部名・コードで絞り込み（省略時は全学）
-
-    Returns:
-        科目数、学期別・学部別・曜日別等の統計情報
     """
     courses = _load_courses()
-
     if faculty:
         courses = [
-            c
-            for c in courses
+            c for c in courses
             if _match(c.get("faculty", ""), faculty)
             or _match(c.get("faculty_code", ""), faculty)
         ]
@@ -293,30 +238,19 @@ def course_stats(faculty: str = "") -> dict:
     for c in courses:
         periods[c.get("period", "不明")] += 1
         faculties[c.get("faculty", "不明")] += 1
-
-        # 曜日を抽出
-        sched = c.get("schedule", "")
         for day in ["月", "火", "水", "木", "金", "土"]:
-            if day in sched:
+            if day in c.get("schedule", ""):
                 schedules[day] += 1
-
-        cred = c.get("credits", "不明")
-        credits_dist[cred] += 1
+        credits_dist[c.get("credits", "不明")] += 1
 
     return {
         "total_courses": len(courses),
         "by_period": dict(sorted(periods.items())),
         "by_faculty": dict(sorted(faculties.items(), key=lambda x: -x[1])),
-        "by_day": {
-            day: schedules.get(day, 0)
-            for day in ["月", "火", "水", "木", "金", "土"]
-        },
+        "by_day": {d: schedules.get(d, 0) for d in ["月", "火", "水", "木", "金", "土"]},
         "by_credits": dict(sorted(credits_dist.items())),
     }
 
-
-# re モジュールのインポート（list_instructors で使用）
-import re
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
