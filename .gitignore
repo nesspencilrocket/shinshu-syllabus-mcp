@@ -1,40 +1,39 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
 .venv/
-data/
-.DS_Store
-*.egg-info/
+venv/
+ENV/
+
+# Build / dist
 dist/
 build/
+*.egg-info/
 
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+nosetests.xml
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
 .env
 .env.*
 secrets.json
 config.local.json
 
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-ENV/
-
-dist/
-build/
-*.egg-info/
-nosetests.xml
-coverage.xml
-*.cover
-*.pyo
-
-.vscode/
-.idea/
-*.swp
-*.swo
-
-.DS_Store
-Thumbs.db
-*.log
-
-# --- プロジェクト固有 (データなど) ---
+# Scraped data (do not redistribute syllabus content)
 data/
