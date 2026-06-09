@@ -1,4 +1,4 @@
-# shinshu-syllabus-mcp
+# shinshu-syllabus-mcp(Legacy)
 
 MCP server for searching Shinshu University course syllabi.
 
